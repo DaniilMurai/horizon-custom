@@ -835,6 +835,8 @@ fn pack_rgb([r, g, b]: [u32; 3]) -> u32 {
 fn pack_coords(coords: u32) -> u16 {
     ((coords >> 16 & 0xFF) | (coords & 0xFF) << 8) as u16
 }
+/// `LightCoordsUtil.FULL_BRIGHT`: block and sky light 15.
+const XRAY_LIGHT: u32 = 15 << 4 | 15 << 20;
 pub struct Mesher<'a> {
     /// CardinalLighting.NETHER: brighter up/down faces.
     pub nether_shading: bool,
@@ -1030,6 +1032,12 @@ impl Mesher<'_> {
                 None => lighting::flat(pad, state, pos, &q.positions, q.facing),
             };
             ([lighting::gray(directional); 4], [coords; 4])
+        };
+        // X-ray: an ore inside rock would take the rock's light (none); draw it fully lit.
+        let (gray, coords) = if self.xray.is_some() {
+            ([lighting::gray(directional); 4], [XRAY_LIGHT; 4])
+        } else {
+            (gray, coords)
         };
         let tint = Self::tint(state, q.tint_index, tints, pos);
         let target = if face.translucent {

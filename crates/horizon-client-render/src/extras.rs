@@ -91,7 +91,7 @@ pub const XRAY_GROUPS: &[XrayGroup] = &[
         "coal",
         "Coal Ore",
         &["coal_ore", "deepslate_coal_ore"],
-        true,
+        false,
     ),
     group(
         "iron",

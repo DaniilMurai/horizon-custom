@@ -53,6 +53,9 @@ in Controls, and adding one would put a non-vanilla mapping into `options.txt`.
   the groups are `extras::XRAY_GROUPS`.
 - **X-ray key** (default `X`; rebind it under Options > Controls > Key Binds > Horizon, or on the Extras page): turns X-ray on and off while you play, even
   with the switch off, and shows "X-ray: On/Off" above the hotbar. Saved as `xrayKey:` in `horizon-extras.txt`, not in `options.txt`: vanilla's key table is pinned by the options parity harness. It is matched on the physical key, before vanilla rebinding.
+- The chosen blocks are drawn at full light (an ore inside rock would otherwise take the rock's dark light), and
+  distance fog is off while X-ray is on, so far ores keep their colour. Coal is off by default: it is the
+  commonest and darkest ore.
 - Client-only, at meshing time (`Mesher::xray`); the server and other players are unaffected. Works on any
   server, so it is a cheat there: off by default.
 - Switching it or changing the choice rebuilds every loaded chunk (`all_sections_changed`), like the
