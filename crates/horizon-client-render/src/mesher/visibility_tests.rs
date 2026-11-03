@@ -87,6 +87,7 @@ fn info(solid: bool) -> Info {
         legacy_solid: false,
         overlay: false,
         leaves: false,
+        block: 0,
         blocks_flow: false,
         ice: false,
         sturdy: 0,
@@ -276,4 +277,35 @@ fn visibility_benchmark() {
             before / after
         );
     }
+}
+
+#[test]
+fn xray_groups_cover_ores_and_not_terrain() {
+    use crate::extras::{Extras, XRAY_GROUPS};
+    let mut e = Extras {
+        xray: true,
+        ..Extras::default()
+    };
+    let set = e.xray_set().unwrap();
+    for name in [
+        "diamond_ore",
+        "deepslate_iron_ore",
+        "nether_gold_ore",
+        "ancient_debris",
+        "chest",
+    ] {
+        assert!(set.contains(name), "{name}");
+    }
+    for name in ["stone", "deepslate", "dirt", "lava", "air"] {
+        assert!(!set.contains(name), "{name}");
+    }
+    e.xray_toggle("lava");
+    e.xray_toggle("diamond");
+    let set = e.xray_set().unwrap();
+    assert!(set.contains("lava") && !set.contains("diamond_ore"));
+    assert!(!Extras::default().xray_set().is_some());
+    // Saved choices round-trip and unknown ids are dropped.
+    assert_eq!(Extras::parse(&e.serialize()), e);
+    assert!(Extras::parse("xrayBlocks:bogus,coal").xray_blocks == ["coal"]);
+    assert!(XRAY_GROUPS.iter().all(|g| !g.names.is_empty()));
 }

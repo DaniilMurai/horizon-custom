@@ -58,9 +58,133 @@ impl Corner {
     }
 }
 
+/// The blocks X-ray has already hashed by name (`XrayGroup::names`).
+pub type XraySet = std::sync::Arc<std::collections::HashSet<String>>;
+/// One choice on the X-ray blocks page: a label and the blocks it shows.
+pub struct XrayGroup {
+    /// Saved in `xrayBlocks`.
+    pub id: &'static str,
+    pub label: &'static str,
+    /// Block names without `minecraft:`.
+    pub names: &'static [&'static str],
+    /// Shown while the player has never chosen.
+    pub default: bool,
+}
+const fn group(
+    id: &'static str,
+    label: &'static str,
+    names: &'static [&'static str],
+    default: bool,
+) -> XrayGroup {
+    XrayGroup {
+        id,
+        label,
+        names,
+        default,
+    }
+}
+/// What the X-ray blocks page offers, in page order.
+pub const XRAY_GROUPS: &[XrayGroup] = &[
+    group(
+        "coal",
+        "Coal Ore",
+        &["coal_ore", "deepslate_coal_ore"],
+        true,
+    ),
+    group(
+        "iron",
+        "Iron Ore",
+        &["iron_ore", "deepslate_iron_ore"],
+        true,
+    ),
+    group(
+        "copper",
+        "Copper Ore",
+        &["copper_ore", "deepslate_copper_ore"],
+        true,
+    ),
+    group(
+        "gold",
+        "Gold Ore",
+        &["gold_ore", "deepslate_gold_ore", "nether_gold_ore"],
+        true,
+    ),
+    group(
+        "redstone",
+        "Redstone Ore",
+        &["redstone_ore", "deepslate_redstone_ore"],
+        true,
+    ),
+    group(
+        "lapis",
+        "Lapis Ore",
+        &["lapis_ore", "deepslate_lapis_ore"],
+        true,
+    ),
+    group(
+        "diamond",
+        "Diamond Ore",
+        &["diamond_ore", "deepslate_diamond_ore"],
+        true,
+    ),
+    group(
+        "emerald",
+        "Emerald Ore",
+        &["emerald_ore", "deepslate_emerald_ore"],
+        true,
+    ),
+    group("quartz", "Nether Quartz Ore", &["nether_quartz_ore"], true),
+    group("debris", "Ancient Debris", &["ancient_debris"], true),
+    group("spawners", "Spawners", &["spawner", "trial_spawner"], true),
+    group(
+        "chests",
+        "Chests",
+        &["chest", "trapped_chest", "ender_chest"],
+        true,
+    ),
+    group("gilded", "Gilded Blackstone", &["gilded_blackstone"], true),
+    group("lava", "Lava", &["lava"], false),
+    group("water", "Water", &["water"], false),
+    group(
+        "obsidian",
+        "Obsidian",
+        &["obsidian", "crying_obsidian"],
+        false,
+    ),
+    group("bedrock", "Bedrock", &["bedrock"], false),
+    group(
+        "amethyst",
+        "Amethyst",
+        &["budding_amethyst", "amethyst_cluster", "amethyst_block"],
+        false,
+    ),
+    group("glowstone", "Glowstone", &["glowstone"], false),
+    group("tnt", "TNT", &["tnt"], false),
+    group("portal", "End Portal Frame", &["end_portal_frame"], false),
+    group("vault", "Vaults", &["vault", "ominous_vault"], false),
+    group("barrels", "Barrels", &["barrel"], false),
+    group(
+        "raw",
+        "Raw Ore Blocks",
+        &["raw_iron_block", "raw_copper_block", "raw_gold_block"],
+        false,
+    ),
+];
+/// The ids of the groups shown until the player chooses.
+pub fn xray_default_groups() -> Vec<String> {
+    XRAY_GROUPS
+        .iter()
+        .filter(|g| g.default)
+        .map(|g| g.id.to_owned())
+        .collect()
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct Extras {
     pub fullbright: bool,
+    /// Only ores, ancient debris, spawners and chests are drawn, seen through the rest (`mesher::xray_shows`).
+    pub xray: bool,
+    /// The `XRAY_GROUPS` ids X-ray keeps.
+    pub xray_blocks: Vec<String>,
     /// Held, dropped and burning light sources light their surroundings (`dynamic_light`).
     pub dynamic_lights: bool,
     pub zoom: bool,
@@ -117,6 +241,8 @@ impl Default for Extras {
     fn default() -> Self {
         Self {
             fullbright: false,
+            xray: false,
+            xray_blocks: xray_default_groups(),
             dynamic_lights: false,
             zoom: false,
             zoom_key: "key.keyboard.z".into(),
@@ -170,6 +296,15 @@ impl Extras {
             };
             match key.trim() {
                 "fullbright" => e.fullbright = flag(e.fullbright),
+                "xray" => e.xray = flag(e.xray),
+                "xrayBlocks" => {
+                    e.xray_blocks = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|id| XRAY_GROUPS.iter().any(|g| g.id == *id))
+                        .map(str::to_owned)
+                        .collect()
+                }
                 "dynamicLights" => e.dynamic_lights = flag(e.dynamic_lights),
                 "zoom" => e.zoom = flag(e.zoom),
                 "zoomKey" if value.starts_with("key.") => e.zoom_key = value.to_owned(),
@@ -223,10 +358,37 @@ impl Extras {
         }
         e
     }
+    /// The blocks X-ray keeps, or `None` while it is off.
+    pub fn xray_set(&self) -> Option<XraySet> {
+        self.xray.then(|| {
+            std::sync::Arc::new(
+                XRAY_GROUPS
+                    .iter()
+                    .filter(|g| self.xray_blocks.iter().any(|id| id == g.id))
+                    .flat_map(|g| g.names.iter().map(|n| (*n).to_owned()))
+                    .collect(),
+            )
+        })
+    }
+    pub fn xray_has(&self, id: &str) -> bool {
+        self.xray_blocks.iter().any(|b| b == id)
+    }
+    /// Show or hide one group, keeping the page's order.
+    pub fn xray_toggle(&mut self, id: &str) {
+        if self.xray_has(id) {
+            self.xray_blocks.retain(|b| b != id);
+        } else {
+            self.xray_blocks.push(id.to_owned());
+            self.xray_blocks
+                .sort_by_key(|b| XRAY_GROUPS.iter().position(|g| g.id == b));
+        }
+    }
     pub fn serialize(&self) -> String {
         format!(
-            "fullbright:{}\ndynamicLights:{}\nzoom:{}\nzoomKey:{}\nzoomLevel:{}\nzoomSmooth:{}\nzoomSensitivity:{}\nfps:{}\nfpsCorner:{}\nfpsLows:{}\nkeystrokes:{}\nkeystrokesCorner:{}\nkeystrokesCps:{}\nmovedToMods:{}\nminimap:{}\nminimapCorner:{}\nminimapSize:{}\nminimapShape:{}\nminimapZoom:{}\nminimapRotate:{}\nautoReconnect:{}\nmouseTweaks:{}\nmouseTweaksWheel:{}\nsort:{}\nsortKey:{}\n{}:{}\nagentControl:{}\ndiscordPresence:{}\n",
+            "fullbright:{}\nxray:{}\nxrayBlocks:{}\ndynamicLights:{}\nzoom:{}\nzoomKey:{}\nzoomLevel:{}\nzoomSmooth:{}\nzoomSensitivity:{}\nfps:{}\nfpsCorner:{}\nfpsLows:{}\nkeystrokes:{}\nkeystrokesCorner:{}\nkeystrokesCps:{}\nmovedToMods:{}\nminimap:{}\nminimapCorner:{}\nminimapSize:{}\nminimapShape:{}\nminimapZoom:{}\nminimapRotate:{}\nautoReconnect:{}\nmouseTweaks:{}\nmouseTweaksWheel:{}\nsort:{}\nsortKey:{}\n{}:{}\nagentControl:{}\ndiscordPresence:{}\n",
             bool_text(self.fullbright),
+            bool_text(self.xray),
+            self.xray_blocks.join(","),
             bool_text(self.dynamic_lights),
             bool_text(self.zoom),
             self.zoom_key,
@@ -378,6 +540,7 @@ impl Cps {
 pub enum Item {
     Fullbright,
     DynamicLights,
+    Xray,
     AutoReconnect,
     MouseTweaks,
     MouseTweaksWheel,
@@ -396,6 +559,8 @@ pub fn rows() -> Vec<Result<Item, &'static str>> {
         Err("Lighting"),
         Ok(Fullbright),
         Ok(DynamicLights),
+        Err("X-ray"),
+        Ok(Xray),
         Err("Inventory"),
         Ok(MouseTweaks),
         Ok(MouseTweaksWheel),
@@ -410,6 +575,7 @@ impl Item {
         match self {
             Item::Fullbright => "Fullbright",
             Item::DynamicLights => "Dynamic lights",
+            Item::Xray => "X-ray",
             Item::AutoReconnect => "Auto-reconnect",
             Item::MouseTweaks => "Mouse Tweaks controls",
             Item::MouseTweaksWheel => "Scroll wheel moves items",
@@ -426,7 +592,7 @@ impl Item {
         Some(match self {
             MouseTweaksWheel => MouseTweaks,
             SortKey => Sort,
-            Fullbright | DynamicLights | MouseTweaks | Sort | AutoReconnect | NoAi
+            Fullbright | DynamicLights | Xray | MouseTweaks | Sort | AutoReconnect | NoAi
             | AgentControl | DiscordPresence => {
                 return None;
             }
@@ -436,6 +602,9 @@ impl Item {
     pub fn description(self) -> &'static str {
         match self {
             Item::Fullbright => "Show blocks and entities at full light, even in dark areas.",
+            Item::Xray => {
+                "Draws only ores, ancient debris, spawners and chests and hides the rest of the terrain. Rebuilds every chunk when switched."
+            }
             Item::DynamicLights => {
                 "Torches and other light sources held, dropped or on fire light the blocks around them."
             }
@@ -471,6 +640,7 @@ impl Item {
         match self {
             Item::Fullbright => Some(Cost::None),
             Item::DynamicLights => Some(Cost::Low),
+            Item::Xray => Some(Cost::None),
             Item::AutoReconnect | Item::MouseTweaks | Item::Sort => Some(Cost::None),
             _ => None,
         }
@@ -480,6 +650,7 @@ impl Item {
         Some(match self {
             Item::Fullbright => e.fullbright,
             Item::DynamicLights => e.dynamic_lights,
+            Item::Xray => e.xray,
             Item::AutoReconnect => e.auto_reconnect,
             Item::MouseTweaks => e.mouse_tweaks,
             Item::MouseTweaksWheel => e.mouse_tweaks_wheel,
@@ -506,6 +677,7 @@ impl Item {
         match self {
             Item::Fullbright => e.fullbright = !e.fullbright,
             Item::DynamicLights => e.dynamic_lights = !e.dynamic_lights,
+            Item::Xray => e.xray = !e.xray,
             Item::AutoReconnect => e.auto_reconnect = !e.auto_reconnect,
             Item::MouseTweaks => e.mouse_tweaks = !e.mouse_tweaks,
             Item::MouseTweaksWheel => e.mouse_tweaks_wheel = !e.mouse_tweaks_wheel,

@@ -298,6 +298,8 @@ struct Info {
     overlay: bool,
     /// `LeavesBlock`: with opaque leaves the faces between two leaf blocks are skipped.
     leaves: bool,
+    /// Index into `MeshTables::block_names`: the block this state belongs to.
+    block: u16,
     blocks_flow: bool,
     ice: bool,
     sturdy: u8,
@@ -322,12 +324,22 @@ pub struct MeshFacts {
 }
 pub struct MeshTables {
     info: Vec<Info>,
+    /// Every distinct block name (without `minecraft:`), by `Info::block`.
+    block_names: Vec<String>,
     pub visibility: FaceVisibility,
     water_still: u16,
     water_flow: u16,
     water_overlay: u16,
     lava_still: u16,
     lava_flow: u16,
+}
+fn block_index(names: &mut Vec<String>, name: &str) -> u16 {
+    // States of a block are consecutive, so the last name is nearly always the one.
+    if let Some(i) = names.iter().rposition(|n| n == name) {
+        return i as u16;
+    }
+    names.push(name.to_owned());
+    (names.len() - 1) as u16
 }
 fn redstone_color(power: u8) -> u32 {
     // RedstoneWireBlock.COLORS
@@ -360,6 +372,7 @@ impl MeshTables {
         };
         let mut covers = std::collections::HashMap::new();
         let mut info = Vec::with_capacity(facts.states.len());
+        let mut block_names: Vec<String> = Vec::new();
         for (id, s) in facts.states.iter().enumerate() {
             let state = assets
                 .registry
@@ -460,6 +473,7 @@ impl MeshTables {
                 legacy_solid: s.legacy_solid,
                 overlay: s.has_class("HalfTransparentBlock") || s.has_class("LeavesBlock"),
                 leaves: s.has_class("LeavesBlock"),
+                block: block_index(&mut block_names, name),
                 blocks_flow: assets.blocks_fluid_flow.contains(&*s.name),
                 ice: s.has_class("IceBlock"),
                 sturdy: s.sturdy_full,
@@ -469,6 +483,7 @@ impl MeshTables {
         }
         Ok(Self {
             info,
+            block_names,
             visibility,
             water_still: layer("minecraft:block/water_still")?,
             water_flow: layer("minecraft:block/water_flow")?,
@@ -719,6 +734,8 @@ pub struct Mesher<'a> {
     pub smooth_lighting: bool,
     /// The `cutoutLeaves` option (fancy graphics); off makes leaves opaque.
     pub cutout_leaves: bool,
+    /// Horizon's X-ray extra: only these blocks are meshed, every face of them.
+    pub xray: Option<crate::extras::XraySet>,
 }
 impl Mesher<'_> {
     /// `region[dz][dx]` are the chunks around the meshed column (centre 1,1).
@@ -730,7 +747,12 @@ impl Mesher<'_> {
             return out;
         }
         let pad = Padded::new(region, sy);
-        out.visibility = visibility(&pad, &self.tables.info);
+        // X-ray sees through stone: the cave-connectivity graph must not hide a section.
+        out.visibility = if self.xray.is_some() {
+            ALL_VISIBLE
+        } else {
+            visibility(&pad, &self.tables.info)
+        };
         let base_y = MIN_Y + sy * 16;
         let mut tints = Tints::new(
             region,
@@ -740,6 +762,14 @@ impl Mesher<'_> {
             [center.x, center.z, base_y],
         );
         let info = &self.tables.info;
+        // One flag per block name, so the per-state test is an index.
+        let xray_mask: Option<Vec<bool>> = self.xray.as_ref().map(|set| {
+            self.tables
+                .block_names
+                .iter()
+                .map(|n| set.contains(n))
+                .collect()
+        });
         let catalog = &self.render.model_catalog;
         let mut models = Vec::new();
         for y in 0..16 {
@@ -754,7 +784,11 @@ impl Mesher<'_> {
                         out.block_entities
                             .push(([center.x * 16 + x, base_y + y, center.z * 16 + z], id));
                     }
-                    if state.solid
+                    if xray_mask.as_ref().is_some_and(|m| !m[state.block as usize]) {
+                        continue;
+                    }
+                    if xray_mask.is_none()
+                        && state.solid
                         && Direction::ALL.iter().all(|d| {
                             let [dx, dy, dz] = d.normal();
                             info[pad.blocks[pi(x + dx, y + dy, z + dz)] as usize].solid
@@ -798,16 +832,17 @@ impl Mesher<'_> {
                         let other = &info[neighbor as usize];
                         // LeavesBlock.skipRendering with opaque leaves.
                         let opaque_leaves = !self.cutout_leaves && state.leaves && other.leaves;
-                        visible[d as usize] = !opaque_leaves
-                            && self
-                                .visibility
-                                .should_render_face(
-                                    BlockStateId(id),
-                                    BlockStateId(neighbor),
-                                    d,
-                                    true,
-                                )
-                                .unwrap_or(true);
+                        visible[d as usize] = xray_mask.is_some()
+                            || !opaque_leaves
+                                && self
+                                    .visibility
+                                    .should_render_face(
+                                        BlockStateId(id),
+                                        BlockStateId(neighbor),
+                                        d,
+                                        true,
+                                    )
+                                    .unwrap_or(true);
                     }
                     for model in &models {
                         for face in &model.faces {

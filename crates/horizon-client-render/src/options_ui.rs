@@ -925,6 +925,8 @@ pub enum Page {
     Controller,
     PadBinds,
     Extras,
+    /// Which blocks X-ray keeps (`extras::XRAY_GROUPS`).
+    XrayBlocks,
     /// CreditsAndAttributionScreen.
     Credits,
     /// Horizon Settings: every page Horizon adds, as a mod's settings
@@ -944,6 +946,12 @@ enum Act {
     Done,
     Cycle(Opt),
     Extra(crate::extras::Item),
+    /// Show or hide `extras::XRAY_GROUPS[i]` in X-ray.
+    XrayBlock(usize),
+    /// All, none or the default choice on the X-ray blocks page.
+    XrayAll,
+    XrayNone,
+    XrayReset,
     Key(&'static str),
     ResetKey(&'static str),
     ResetKeys,
@@ -1271,6 +1279,7 @@ impl OptionsUi {
             Page::Controller => "Controller Settings",
             Page::PadBinds => "Controller Binds",
             Page::Extras => "Horizon Extras",
+            Page::XrayBlocks => "X-ray Blocks",
             Page::Credits => "credits_and_attribution.screen.title",
             Page::Horizon => "Horizon Settings",
             Page::Agent => "AI Agent",
@@ -1398,6 +1407,22 @@ impl OptionsUi {
                 };
                 for row in crate::extras::rows() {
                     match row {
+                        Ok(crate::extras::Item::Xray) => {
+                            flush(&mut rows, &mut section);
+                            let choose = button(
+                                0.0,
+                                0.0,
+                                150.0,
+                                Text::literal("Choose blocks..."),
+                                Act::Push(Page::XrayBlocks),
+                            );
+                            let choose = if s.extras.xray {
+                                choose
+                            } else {
+                                inactive(choose)
+                            };
+                            rows.push(Row::Buttons(extra(crate::extras::Item::Xray), Some(choose)));
+                        }
                         Err(header) => {
                             flush(&mut rows, &mut section);
                             rows.push(Row::Header(header));
@@ -1406,6 +1431,40 @@ impl OptionsUi {
                     }
                 }
                 flush(&mut rows, &mut section);
+                rows
+            }
+            Page::XrayBlocks => {
+                let mut rows = vec![Row::Buttons(
+                    button(0.0, 0.0, 150.0, Text::literal("Show all"), Act::XrayAll),
+                    Some(button(
+                        0.0,
+                        0.0,
+                        150.0,
+                        Text::literal("Show none"),
+                        Act::XrayNone,
+                    )),
+                )];
+                rows.push(Row::Buttons(
+                    button(
+                        0.0,
+                        0.0,
+                        150.0,
+                        Text::literal("Reset to default"),
+                        Act::XrayReset,
+                    ),
+                    None,
+                ));
+                rows.push(Row::Header("Blocks to show"));
+                let toggle = |i: usize| {
+                    let g = &crate::extras::XRAY_GROUPS[i];
+                    let on = s.extras.xray_has(g.id);
+                    let label = format!("{}: {}", g.label, if on { "On" } else { "Off" });
+                    button(0.0, 0.0, 150.0, Text::literal(label), Act::XrayBlock(i))
+                };
+                let n = crate::extras::XRAY_GROUPS.len();
+                for i in (0..n).step_by(2) {
+                    rows.push(Row::Buttons(toggle(i), (i + 1 < n).then(|| toggle(i + 1))));
+                }
                 rows
             }
             Page::Horizon => {
@@ -2683,6 +2742,25 @@ impl OptionsUi {
                                 item.cycle(&mut s.extras, right);
                                 events.push(Event::Changed);
                             }
+                        }
+                        Act::XrayBlock(i) => {
+                            s.extras.xray_toggle(crate::extras::XRAY_GROUPS[i].id);
+                            events.push(Event::Changed);
+                        }
+                        Act::XrayAll => {
+                            s.extras.xray_blocks = crate::extras::XRAY_GROUPS
+                                .iter()
+                                .map(|g| g.id.to_owned())
+                                .collect();
+                            events.push(Event::Changed);
+                        }
+                        Act::XrayNone => {
+                            s.extras.xray_blocks.clear();
+                            events.push(Event::Changed);
+                        }
+                        Act::XrayReset => {
+                            s.extras.xray_blocks = crate::extras::xray_default_groups();
+                            events.push(Event::Changed);
                         }
                         Act::Key(name) => self.selected_key = Some(name),
                         Act::ResetKey(name) => {
@@ -4133,6 +4211,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn xray_blocks_page_toggles_groups() {
+        let mut s = Settings::default();
+        let mut ui = OptionsUi::default();
+        ui.show(Page::XrayBlocks);
+        assert_eq!(ui.page(), Page::XrayBlocks);
+        let (widgets, _, _, _) = ui.layout(&s, 400.0, 300.0);
+        let toggles = widgets
+            .iter()
+            .filter(|w| {
+                matches!(
+                    w.kind,
+                    WKind::Button {
+                        act: Act::XrayBlock(_),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(toggles, crate::extras::XRAY_GROUPS.len());
+        assert!(s.extras.xray_has("diamond") && !s.extras.xray_has("lava"));
+        s.extras.xray_toggle("lava");
+        s.extras.xray_toggle("diamond");
+        assert!(s.extras.xray_has("lava") && !s.extras.xray_has("diamond"));
+    }
     #[test]
     fn extras_and_vanilla_bindings_accept_mouse_buttons() {
         use crate::extras::{Extras, SORT_KEY};
