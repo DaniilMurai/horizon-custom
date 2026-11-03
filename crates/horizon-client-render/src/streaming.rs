@@ -160,13 +160,14 @@ impl<G: ChunkGenerator> Saves for G {
     }
 }
 /// Per-job mesher inputs that change with the dimension or the options.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct MeshSettings {
     nether: bool,
     zoom: BiomeZoom,
     blend_radius: i32,
     smooth_lighting: bool,
     cutout_leaves: bool,
+    xray: Option<crate::extras::XraySet>,
 }
 enum Job {
     Generate(i32, i32),
@@ -338,6 +339,8 @@ pub struct Streaming {
     /// The `ao` and `cutoutLeaves` options.
     pub smooth_lighting: bool,
     pub cutout_leaves: bool,
+    /// Horizon's X-ray extra (`mesher::xray_shows` blocks only).
+    pub xray: Option<crate::extras::XraySet>,
     /// Incremental relighting of block edits on lit chunks (see `light::relight`).
     light_tables: Arc<LightTables>,
     /// Applied edits by sequence, replayed onto light jobs snapshotted before them.
@@ -631,6 +634,7 @@ impl Streaming {
                                         blend_radius: settings.blend_radius,
                                         smooth_lighting: settings.smooth_lighting,
                                         cutout_leaves: settings.cutout_leaves,
+                                        xray: settings.xray.clone(),
                                         assets: &context.assets,
                                         render: &context.render,
                                         tables: &context.tables,
@@ -693,6 +697,7 @@ impl Streaming {
             biome_blend: 2,
             smooth_lighting: true,
             cutout_leaves: true,
+            xray: None,
             light_tables,
             light_log: Vec::new(),
             light_edit_sequence: 0,
@@ -1418,6 +1423,7 @@ impl Streaming {
                             blend_radius: self.biome_blend,
                             smooth_lighting: self.smooth_lighting,
                             cutout_leaves: self.cutout_leaves,
+                            xray: self.xray.clone(),
                         },
                     ),
                 );

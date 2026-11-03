@@ -218,6 +218,7 @@ fn relit_columns_keep_every_mesh_current() {
             blend_radius: 2,
             smooth_lighting: true,
             cutout_leaves: true,
+            xray: None,
             assets: &context.assets,
             render: &context.render,
             tables: &context.tables,

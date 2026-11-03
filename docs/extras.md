@@ -1,6 +1,6 @@
 # Horizon extras
 
-Optional conveniences built into the client: fullbright, dynamic lights, your own name tag, auto-reconnect,
+Optional conveniences built into the client: fullbright, X-ray, dynamic lights, your own name tag, auto-reconnect,
 Mouse Tweaks-style inventory controls and inventory sorting. **Every one is off by default**: a fresh
 install looks and behaves exactly like vanilla 26.3, and turning an extra off
 again restores vanilla's behaviour completely.
@@ -44,6 +44,17 @@ in Controls, and adding one would put a non-vanilla mapping into `options.txt`.
 - Displays blocks and entities with a fully bright lightmap, including in dark caves.
 - Turning it off restores the normal lightmap using the current brightness,
   time of day and effects. The brightness slider keeps its normal range.
+
+### X-ray (`xray`, default off)
+- Draws only the blocks you choose, every face of them, and nothing else: you see them through stone, dirt
+  and water. **Extras → X-ray → Choose blocks...** lists groups (ores with their deepslate variants, ancient
+  debris, spawners, chests, and off by default lava, water, obsidian, bedrock, amethyst, TNT...), each On/Off,
+  with Show all, Show none and Reset to default. Saved as `xrayBlocks:` (group ids) in `horizon-extras.txt`;
+  the groups are `extras::XRAY_GROUPS`.
+- Client-only, at meshing time (`Mesher::xray`); the server and other players are unaffected. Works on any
+  server, so it is a cheat there: off by default.
+- Switching it or changing the choice rebuilds every loaded chunk (`all_sections_changed`), like the
+  ambient-occlusion option. Distant LOD terrain is not filtered yet.
 
 ### Dynamic lights (`dynamicLights`, default off)
 - A light source held by a player or mob (main or off hand), dropped as an item, or an entity on
