@@ -8,6 +8,8 @@ use std::{collections::VecDeque, fs, path::Path};
 pub const FILE: &str = "horizon-extras.txt";
 /// The name the options screen uses while the sort key waits for a key.
 pub const SORT_KEY: &str = "horizon.sort";
+/// `selected_key` while the X-ray key waits for a press.
+pub const XRAY_KEY: &str = "horizon.xray";
 
 /// The minimap's sizes in GUI pixels, and its zooms in blocks per pixel.
 pub const MINIMAP_SIZES: [(u8, &str); 3] = [(64, "Small"), (96, "Medium"), (128, "Large")];
@@ -185,6 +187,8 @@ pub struct Extras {
     pub xray: bool,
     /// The `XRAY_GROUPS` ids X-ray keeps.
     pub xray_blocks: Vec<String>,
+    /// A vanilla key name: toggles X-ray in the world.
+    pub xray_key: String,
     /// Held, dropped and burning light sources light their surroundings (`dynamic_light`).
     pub dynamic_lights: bool,
     pub zoom: bool,
@@ -244,6 +248,7 @@ impl Default for Extras {
             fullbright: false,
             xray: false,
             xray_blocks: xray_default_groups(),
+            xray_key: "key.keyboard.x".into(),
             dynamic_lights: false,
             zoom: false,
             zoom_key: "key.keyboard.z".into(),
@@ -299,6 +304,7 @@ impl Extras {
             match key.trim() {
                 "fullbright" => e.fullbright = flag(e.fullbright),
                 "xray" => e.xray = flag(e.xray),
+                "xrayKey" if value.starts_with("key.") => e.xray_key = value.to_owned(),
                 "xrayBlocks" => {
                     e.xray_blocks = value
                         .split(',')
@@ -388,10 +394,11 @@ impl Extras {
     }
     pub fn serialize(&self) -> String {
         format!(
-            "fullbright:{}\nxray:{}\nxrayBlocks:{}\ndynamicLights:{}\nzoom:{}\nzoomKey:{}\nzoomLevel:{}\nzoomSmooth:{}\nzoomSensitivity:{}\nfps:{}\nfpsCorner:{}\nfpsLows:{}\nkeystrokes:{}\nkeystrokesCorner:{}\nkeystrokesCps:{}\nmovedToMods:{}\nminimap:{}\nminimapCorner:{}\nminimapSize:{}\nminimapShape:{}\nminimapZoom:{}\nminimapRotate:{}\nautoReconnect:{}\nownNameTag:{}\nmouseTweaks:{}\nmouseTweaksWheel:{}\nsort:{}\nsortKey:{}\n{}:{}\nagentControl:{}\ndiscordPresence:{}\n",
+            "fullbright:{}\nxray:{}\nxrayBlocks:{}\nxrayKey:{}\ndynamicLights:{}\nzoom:{}\nzoomKey:{}\nzoomLevel:{}\nzoomSmooth:{}\nzoomSensitivity:{}\nfps:{}\nfpsCorner:{}\nfpsLows:{}\nkeystrokes:{}\nkeystrokesCorner:{}\nkeystrokesCps:{}\nmovedToMods:{}\nminimap:{}\nminimapCorner:{}\nminimapSize:{}\nminimapShape:{}\nminimapZoom:{}\nminimapRotate:{}\nautoReconnect:{}\nownNameTag:{}\nmouseTweaks:{}\nmouseTweaksWheel:{}\nsort:{}\nsortKey:{}\n{}:{}\nagentControl:{}\ndiscordPresence:{}\n",
             bool_text(self.fullbright),
             bool_text(self.xray),
             self.xray_blocks.join(","),
+            self.xray_key,
             bool_text(self.dynamic_lights),
             bool_text(self.zoom),
             self.zoom_key,
@@ -432,6 +439,7 @@ impl Extras {
     pub fn set_key(&mut self, name: &str, value: String) -> bool {
         match name {
             SORT_KEY => self.sort_key = value,
+            XRAY_KEY => self.xray_key = value,
             _ => return false,
         }
         true
@@ -546,6 +554,7 @@ pub enum Item {
     DynamicLights,
     OwnNameTag,
     Xray,
+    XrayKey,
     AutoReconnect,
     MouseTweaks,
     MouseTweaksWheel,
@@ -568,6 +577,7 @@ pub fn rows() -> Vec<Result<Item, &'static str>> {
         Ok(OwnNameTag),
         Err("X-ray"),
         Ok(Xray),
+        Ok(XrayKey),
         Err("Inventory"),
         Ok(MouseTweaks),
         Ok(MouseTweaksWheel),
@@ -584,6 +594,7 @@ impl Item {
             Item::DynamicLights => "Dynamic lights",
             Item::OwnNameTag => "Own name tag",
             Item::Xray => "X-ray",
+            Item::XrayKey => "X-ray key",
             Item::AutoReconnect => "Auto-reconnect",
             Item::MouseTweaks => "Mouse Tweaks controls",
             Item::MouseTweaksWheel => "Scroll wheel moves items",
@@ -600,8 +611,8 @@ impl Item {
         Some(match self {
             MouseTweaksWheel => MouseTweaks,
             SortKey => Sort,
-            Fullbright | DynamicLights | OwnNameTag | Xray | MouseTweaks | Sort | AutoReconnect
-            | NoAi | AgentControl | DiscordPresence => {
+            Fullbright | DynamicLights | OwnNameTag | Xray | XrayKey | MouseTweaks | Sort
+            | AutoReconnect | NoAi | AgentControl | DiscordPresence => {
                 return None;
             }
         })
@@ -630,6 +641,9 @@ impl Item {
             }
             Item::Sort => {
                 "Sorts the inventory, chests, barrels, ender chests and shulker boxes in creative tab order, merging stacks."
+            }
+            Item::XrayKey => {
+                "Turns X-ray on and off while you play, whatever the switch says. Click, then press a key; Escape unbinds it."
             }
             Item::SortKey => {
                 "Sorts the part under the cursor. Click, then press a key; Escape unbinds it."
@@ -680,6 +694,7 @@ impl Item {
     pub fn value(self, e: &Extras) -> String {
         match self {
             Item::SortKey => crate::keybinds::display_name(&e.sort_key).plain(),
+            Item::XrayKey => crate::keybinds::display_name(&e.xray_key).plain(),
             other => match other.switch(e) {
                 Some(true) => "On".into(),
                 _ => "Off".into(),
@@ -701,13 +716,14 @@ impl Item {
             Item::NoAi => e.no_ai = !e.no_ai,
             Item::AgentControl => e.agent_control = !e.agent_control,
             Item::DiscordPresence => e.discord_presence = !e.discord_presence,
-            Item::SortKey => {}
+            Item::SortKey | Item::XrayKey => {}
         }
     }
     /// The key name the options screen waits on for a key item.
     pub fn key_name(self) -> Option<&'static str> {
         match self {
             Item::SortKey => Some(SORT_KEY),
+            Item::XrayKey => Some(XRAY_KEY),
             _ => None,
         }
     }

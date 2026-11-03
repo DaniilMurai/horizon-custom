@@ -31,6 +31,21 @@ pub(super) struct ExtrasState {
 const MINIMAP_BUDGET: Duration = Duration::from_micros(300);
 
 impl Game<'_> {
+    /// The X-ray key: flips the extra while playing and rebuilds the chunks.
+    pub(super) fn xray_key_press(&mut self, key: winit::keyboard::KeyCode) -> bool {
+        use horizon_client::{keybinds, text::Text};
+        let hit = keybinds::key_name(key).is_some_and(|n| n == self.settings.extras.xray_key);
+        if !hit || self.screen != Screen::Playing {
+            return false;
+        }
+        let on = !self.settings.extras.xray;
+        self.settings.extras.xray = on;
+        self.settings.save(&Self::options_path());
+        self.apply_settings();
+        let label = format!("X-ray: {}", if on { "On" } else { "Off" });
+        self.titles.set_overlay(Text::literal(label), false);
+        true
+    }
     fn extras_now(&self) -> f64 {
         self.started.elapsed().as_secs_f64()
     }

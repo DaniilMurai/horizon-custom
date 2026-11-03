@@ -51,6 +51,8 @@ in Controls, and adding one would put a non-vanilla mapping into `options.txt`.
   debris, spawners, chests, and off by default lava, water, obsidian, bedrock, amethyst, TNT...), each On/Off,
   with Show all, Show none and Reset to default. Saved as `xrayBlocks:` (group ids) in `horizon-extras.txt`;
   the groups are `extras::XRAY_GROUPS`.
+- **X-ray key** (default `X`, rebind it on the Extras page): turns X-ray on and off while you play, even
+  with the switch off, and shows "X-ray: On/Off" above the hotbar. Saved as `xrayKey:`.
 - Client-only, at meshing time (`Mesher::xray`); the server and other players are unaffected. Works on any
   server, so it is a cheat there: off by default.
 - Switching it or changing the choice rebuilds every loaded chunk (`all_sections_changed`), like the

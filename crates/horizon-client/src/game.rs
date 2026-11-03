@@ -12820,7 +12820,7 @@ impl Game<'_> {
             }
             return Ok(());
         }
-        if self.sort_key_press(key) {
+        if self.sort_key_press(key) || self.xray_key_press(key) {
             return Ok(());
         }
         if self.remote.is_some() && self.remote_key(key)? {

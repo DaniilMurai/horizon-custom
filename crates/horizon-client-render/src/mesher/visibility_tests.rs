@@ -305,6 +305,10 @@ fn xray_groups_cover_ores_and_not_terrain() {
     let set = e.xray_set().unwrap();
     assert!(set.contains("lava") && !set.contains("diamond_ore"));
     assert!(!Extras::default().xray_set().is_some());
+    // The toggle key is X until rebound, and the binding is saved.
+    assert_eq!(e.xray_key, "key.keyboard.x");
+    assert!(e.set_key(crate::extras::XRAY_KEY, "key.keyboard.v".into()));
+    assert_eq!(Extras::parse(&e.serialize()).xray_key, "key.keyboard.v");
     // Saved choices round-trip and unknown ids are dropped.
     assert_eq!(Extras::parse(&e.serialize()), e);
     assert!(Extras::parse("xrayBlocks:bogus,coal").xray_blocks == ["coal"]);
