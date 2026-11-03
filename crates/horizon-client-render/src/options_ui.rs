@@ -1051,6 +1051,8 @@ enum Act {
     XrayAll,
     XrayNone,
     XrayReset,
+    /// The X-ray key back to X (Controls > Key Binds).
+    ResetXrayKey,
     Key(&'static str),
     ResetKey(&'static str),
     ResetKeys,
@@ -2131,6 +2133,80 @@ impl OptionsUi {
                     });
                     y += 20.0;
                 }
+                // Horizon's own keys are settings of horizon-extras.txt, not vanilla mappings
+                // (options.txt stays vanilla's), so the page lists them after the vanilla ones.
+                if ["horizon", "x-ray", "xray"]
+                    .iter()
+                    .any(|w| query.is_empty() || w.contains(&query))
+                {
+                    out.push(Widget {
+                        x: 0.0,
+                        y: y + 7.0,
+                        w,
+                        h: 9.0,
+                        kind: WKind::Text {
+                            text: Text::literal("Horizon").with_style(&Style {
+                                bold: Some(true),
+                                underlined: Some(true),
+                                ..Style::default()
+                            }),
+                            color: u32::MAX,
+                            centered: true,
+                        },
+                        list: false,
+                    });
+                    y += 20.0;
+                    out.push(Widget {
+                        x: row_left + 2.0,
+                        y: y + 6.0,
+                        w: 200.0,
+                        h: 9.0,
+                        kind: WKind::Text {
+                            text: Text::literal("Toggle X-ray"),
+                            color: u32::MAX,
+                            centered: false,
+                        },
+                        list: false,
+                    });
+                    let key = s.extras.xray_key.clone();
+                    let mut message = keybinds::display_name(&key);
+                    // Another mapping on the same key: vanilla's yellow brackets.
+                    if MAPPINGS
+                        .iter()
+                        .any(|m| m.2 != "debug" && s.keys.get(m.0) == key)
+                    {
+                        message = Text::literal("[ ")
+                            .append(message.with_color(text::WHITE))
+                            .append(" ]")
+                            .with_color(text::YELLOW);
+                    }
+                    if self.selected_key == Some(crate::extras::XRAY_KEY) {
+                        message = Text::literal("> ")
+                            .append(message.with_style(&Style {
+                                color: Some(text::WHITE),
+                                underlined: Some(true),
+                                ..Style::default()
+                            }))
+                            .append(" <")
+                            .with_color(text::YELLOW);
+                    }
+                    let reset_x = scrollbar_x - 50.0 - 10.0;
+                    let change_x = reset_x - 5.0 - 75.0;
+                    out.push(button(
+                        change_x,
+                        y,
+                        75.0,
+                        message,
+                        Act::Extra(crate::extras::Item::XrayKey),
+                    ));
+                    let reset = button(reset_x, y, 50.0, tr("controls.reset"), Act::ResetXrayKey);
+                    out.push(if key == crate::extras::Extras::default().xray_key {
+                        inactive(reset)
+                    } else {
+                        reset
+                    });
+                    y += 20.0;
+                }
                 content = y + self.scroll - top + 2.0;
                 out[list_start..].iter_mut().for_each(|w| w.list = true);
                 out.push(button(
@@ -2881,6 +2957,10 @@ impl OptionsUi {
                             s.extras.xray_blocks.clear();
                             events.push(Event::Changed);
                         }
+                        Act::ResetXrayKey => {
+                            s.extras.xray_key = crate::extras::Extras::default().xray_key;
+                            events.push(Event::Changed);
+                        }
                         Act::XrayReset => {
                             s.extras.xray_blocks = crate::extras::xray_default_groups();
                             events.push(Event::Changed);
@@ -2892,6 +2972,7 @@ impl OptionsUi {
                         }
                         Act::ResetKeys => {
                             s.keys.reset_all();
+                            s.extras.xray_key = crate::extras::Extras::default().xray_key;
                             events.push(Event::Changed);
                         }
                         Act::PadKey(action) => self.selected_pad_action = Some(action),
@@ -4527,6 +4608,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn key_binds_page_lists_the_xray_key_and_resets_it() {
+        let mut s = Settings::default();
+        let mut ui = OptionsUi::default();
+        ui.show(Page::KeyBinds);
+        let (widgets, _, _, _) = ui.layout(&s, 400.0, 300.0);
+        let has = |w: &Vec<Widget>, want: Act| {
+            w.iter()
+                .any(|w| matches!(&w.kind, WKind::Button { act, .. } if *act == want))
+        };
+        assert!(has(&widgets, Act::Extra(crate::extras::Item::XrayKey)));
+        assert!(has(&widgets, Act::ResetXrayKey));
+        s.extras.xray_key = "key.keyboard.v".into();
+        ui.selected_key = Some(crate::extras::XRAY_KEY);
+        assert!(
+            s.extras
+                .set_key(crate::extras::XRAY_KEY, "key.keyboard.b".into())
+        );
+        assert_eq!(s.extras.xray_key, "key.keyboard.b");
+    }
     #[test]
     fn xray_blocks_page_toggles_groups() {
         let mut s = Settings::default();

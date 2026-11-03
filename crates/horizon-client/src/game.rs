@@ -12820,7 +12820,7 @@ impl Game<'_> {
             }
             return Ok(());
         }
-        if self.sort_key_press(key) || self.xray_key_press(key) {
+        if self.sort_key_press(key) {
             return Ok(());
         }
         if self.remote.is_some() && self.remote_key(key)? {
@@ -14079,6 +14079,14 @@ impl ApplicationHandler for Game<'_> {
                             .is_some_and(|n| self.settings.keys.get("key.smoothCamera") == n)
                     {
                         self.smooth_camera = !self.smooth_camera;
+                    }
+                    // The X-ray key is a Horizon setting, matched on the physical key before
+                    // the vanilla rebinding below can turn the press into another key.
+                    if event.state == ElementState::Pressed
+                        && !event.repeat
+                        && self.xray_key_press(key)
+                    {
+                        return Ok(());
                     }
                     // Key binds: act as the default key of every mapping bound
                     // to it (KeyMapping.set drives them all).
