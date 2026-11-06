@@ -7,16 +7,20 @@
 //! The prepared bundles are the built-in pack, so the packs above it are
 //! entries that replace or join a bundle's (`GeneratorData::load_with`).
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 /// The bundle of `dimension/<id>.json` level stems. Nothing prepared has
 /// it: a pack's level stem stands in for the world preset's.
 pub const DIMENSIONS: &str = "dimensions";
+/// The bundle of `dimension_type/<id>.json` dimension types. Nothing
+/// prepared has it: the vanilla types' are `LevelHeight::vanilla`.
+pub const DIMENSION_TYPES: &str = "dimension_types";
 
 /// Pack folders (`data/<ns>/<kind>/`) the chunk generator reads, and the
 /// bundle each joins.
-const KINDS: [(&str, &str); 15] = [
+const KINDS: [(&str, &str); 16] = [
     ("dimension", DIMENSIONS),
+    ("dimension_type", DIMENSION_TYPES),
     ("worldgen/biome", "biomes"),
     ("worldgen/block_state_provider", "state_providers"),
     // 26.3's names: 26.2 called them configured_carver and configured_feature.
@@ -40,7 +44,13 @@ const TAG_KINDS: [(&str, &str); 3] = [
     ("tags/worldgen/biome", "biome_tags"),
 ];
 /// The pack folders `add_file` looks at, in walk order.
-pub const PACK_KINDS: [&str; 4] = ["dimension", "dimension_type", "tags", "worldgen"];
+pub const PACK_KINDS: [&str; 5] = [
+    "dimension",
+    "dimension_type",
+    "structure",
+    "tags",
+    "worldgen",
+];
 
 /// `ns:path` for a pack file `data/<ns>/<kind>/<path>.json`.
 fn resource_id(file: &str, kind: &str) -> Option<String> {
@@ -52,20 +62,91 @@ fn resource_id(file: &str, kind: &str) -> Option<String> {
     Some(format!("{ns}:{path}"))
 }
 
+/// `ns:path` for a pack's structure template `data/<ns>/structure/<path>.nbt`.
+pub fn template_id(file: &str) -> Option<String> {
+    let (ns, rest) = file.strip_prefix("data/")?.split_once('/')?;
+    let path = rest.strip_prefix("structure/")?.strip_suffix(".nbt")?;
+    Some(format!("{ns}:{path}"))
+}
+
 /// What `add_file` made of a pack file.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PackFile {
     /// An entry or tag file the generator reads.
     Read,
-    /// A dimension type: Horizon keeps each dimension's vanilla build
-    /// height, so it is not read.
-    DimensionType { id: String, min_y: i64, height: i64 },
     /// A worldgen file of a kind the generator does not read (its folder).
     NotRead(String),
     /// A generator file whose text could not be read.
     Unreadable,
     /// Not worldgen.
     Other,
+}
+
+/// A level's build range (`LevelHeightAccessor`: `min_y`, `height`) and the
+/// rest of its dimension type the game reads: `logical_height`,
+/// `has_skylight` and `has_ceiling`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LevelHeight {
+    pub min_y: i32,
+    pub height: i32,
+    pub logical_height: i32,
+    pub has_skylight: bool,
+    pub has_ceiling: bool,
+}
+impl LevelHeight {
+    /// The vanilla dimension types'.
+    pub fn vanilla(dimension_type: &str) -> Option<Self> {
+        let (min_y, height, logical_height, has_skylight, has_ceiling) = match dimension_type {
+            // overworld_caves builds like the Overworld but has a ceiling.
+            "minecraft:overworld" => (-64, 384, 384, true, false),
+            "minecraft:overworld_caves" => (-64, 384, 384, true, true),
+            "minecraft:the_nether" => (0, 256, 128, false, true),
+            "minecraft:the_end" => (0, 256, 256, true, false),
+            _ => return None,
+        };
+        Some(Self {
+            min_y,
+            height,
+            logical_height,
+            has_skylight,
+            has_ceiling,
+        })
+    }
+    /// A dimension type's JSON, if its codec accepts the range: multiples
+    /// of 16, at least 16 high, within `DimensionType.MIN_Y` (-2032) and
+    /// `MAX_Y` (2031), and a logical height within the height.
+    pub fn of_json(v: &Value) -> Option<Self> {
+        let int = |k: &str| i32::try_from(v[k].as_i64()?).ok();
+        let (min_y, height) = (int("min_y")?, int("height")?);
+        let logical_height = int("logical_height").unwrap_or(height);
+        let valid = min_y % 16 == 0
+            && height % 16 == 0
+            && height >= 16
+            && min_y >= -2032
+            && min_y + height <= 2032
+            && (0..=height).contains(&logical_height);
+        valid.then_some(Self {
+            min_y,
+            height,
+            logical_height,
+            has_skylight: v["has_skylight"].as_bool().unwrap_or(true),
+            // The codec requires has_ceiling; a type the packs leave it out
+            // of gets the open-sky default.
+            has_ceiling: v["has_ceiling"].as_bool().unwrap_or(false),
+        })
+    }
+    /// A level stem's `type` (a dimension type id, or one inline), with the
+    /// packs' `types` over the vanilla ones.
+    pub fn of_type(ty: &Value, types: &BTreeMap<String, String>) -> Option<Self> {
+        match ty {
+            Value::String(id) => match types.get(id) {
+                Some(json) => Self::of_json(&serde_json::from_str(json).ok()?),
+                None => Self::vanilla(id),
+            },
+            inline @ Value::Object(_) => Self::of_json(inline),
+            _ => None,
+        }
+    }
 }
 
 /// Replacement and added bundle entries, and tag files, from data packs.
@@ -75,10 +156,21 @@ pub struct WorldgenOverrides {
     entries: BTreeMap<String, BTreeMap<String, String>>,
     /// Tag bundle name → (tag id, pack id, tag file text), lowest pack first.
     tags: BTreeMap<String, Vec<(String, String, String)>>,
+    /// Template id → the highest pack's `.nbt` file.
+    templates: BTreeMap<String, Arc<[u8]>>,
 }
 impl WorldgenOverrides {
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty() && self.tags.is_empty()
+        self.entries.is_empty() && self.tags.is_empty() && self.templates.is_empty()
+    }
+    /// A pack's structure template: called for packs from the lowest to the
+    /// highest, so the last call for an id wins.
+    pub fn set_template(&mut self, id: &str, nbt: Vec<u8>) {
+        self.templates.insert(id.to_owned(), nbt.into());
+    }
+    /// The structure templates packs give, by id.
+    pub fn templates(&self) -> &BTreeMap<String, Arc<[u8]>> {
+        &self.templates
     }
     /// A pack's file for `id` in `bundle`: called for packs from the lowest
     /// to the highest, so the last call for an id wins.
@@ -127,15 +219,6 @@ impl WorldgenOverrides {
             };
             self.add_tag(bundle, &id, pack, json);
             PackFile::Read
-        } else if let Some(id) = resource_id(file, "dimension_type") {
-            let v: Value = read()
-                .and_then(|t| serde_json::from_str(&t).ok())
-                .unwrap_or_default();
-            PackFile::DimensionType {
-                id,
-                min_y: v["min_y"].as_i64().unwrap_or_default(),
-                height: v["height"].as_i64().unwrap_or_default(),
-            }
         } else if rest.starts_with("worldgen/") || rest.starts_with("tags/worldgen/") {
             PackFile::NotRead(rest.rsplit_once('/').map_or(rest, |(k, _)| k).to_owned())
         } else {
@@ -199,6 +282,21 @@ impl WorldgenOverrides {
         }
         warnings
     }
+    /// The build range of the vanilla level `level` (`minecraft:overworld`,
+    /// `minecraft:the_nether`, `minecraft:the_end`) with these packs: the
+    /// dimension type its level stem names (a pack's stem, else the
+    /// preset's, whose type has the level's name), a pack's file for that
+    /// type over the vanilla one. `None` when the packs give it a range the
+    /// codec refuses.
+    pub fn level_height(&self, level: &str) -> Option<LevelHeight> {
+        let none = BTreeMap::new();
+        let types = self.entries.get(DIMENSION_TYPES).unwrap_or(&none);
+        let ty = match self.entries.get(DIMENSIONS).and_then(|d| d.get(level)) {
+            Some(stem) => serde_json::from_str::<Value>(stem).ok()?["type"].clone(),
+            None => Value::String(level.to_owned()),
+        };
+        LevelHeight::of_type(&ty, types)
+    }
     /// The entries packs give `bundle`.
     pub fn entries(&self, bundle: &str) -> impl Iterator<Item = (&str, &str)> {
         self.entries
@@ -245,6 +343,15 @@ impl WorldgenOverrides {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_template_id_comes_from_a_structure_nbt_file_only() {
+        assert_eq!(
+            template_id("data/p/structure/room/a.nbt").as_deref(),
+            Some("p:room/a")
+        );
+        assert_eq!(template_id("data/p/structure/a.json"), None);
+        assert_eq!(template_id("data/p/worldgen/structure/a.nbt"), None);
+    }
 
     #[test]
     fn the_highest_pack_wins_and_others_join() {
@@ -301,11 +408,7 @@ mod tests {
                 "data/minecraft/dimension_type/overworld.json",
                 r#"{"min_y":-64,"height":2096}"#
             ),
-            PackFile::DimensionType {
-                id: "minecraft:overworld".into(),
-                min_y: -64,
-                height: 2096
-            }
+            PackFile::Read
         );
         assert_eq!(
             add("data/minecraft/worldgen/carver/cave.json", "6"),
@@ -346,6 +449,74 @@ mod tests {
         assert_eq!(get("state_providers"), [("p:stony_cliffs", "8")]);
         assert_eq!(get("structures"), []);
         assert_eq!(o.tags("biome_tags").count(), 1);
+    }
+
+    #[test]
+    fn levels_take_their_height_from_the_packs_dimension_types() {
+        let mut o = WorldgenOverrides::default();
+        let overworld = o.level_height("minecraft:overworld");
+        assert_eq!(overworld, LevelHeight::vanilla("minecraft:overworld"));
+        let nether = o.level_height("minecraft:the_nether").unwrap();
+        assert_eq!(
+            (
+                nether.logical_height,
+                nether.has_skylight,
+                nether.has_ceiling
+            ),
+            (128, false, true)
+        );
+        // overworld_caves builds like the Overworld but has a ceiling.
+        let caves = LevelHeight::vanilla("minecraft:overworld_caves").unwrap();
+        assert_eq!(
+            (
+                caves.min_y,
+                caves.height,
+                caves.has_skylight,
+                caves.has_ceiling
+            ),
+            (-64, 384, true, true)
+        );
+        o.set(
+            DIMENSION_TYPES,
+            "minecraft:overworld",
+            r#"{"min_y":-64,"height":2096,"logical_height":384,"has_skylight":true,"has_ceiling":true}"#.into(),
+        );
+        let tall = LevelHeight {
+            min_y: -64,
+            height: 2096,
+            logical_height: 384,
+            has_skylight: true,
+            has_ceiling: true,
+        };
+        assert_eq!(o.level_height("minecraft:overworld"), Some(tall));
+        let end = o.level_height("minecraft:the_end");
+        assert_eq!(end, LevelHeight::vanilla("minecraft:the_end"));
+        // A pack's level stem names another type.
+        o.set(
+            DIMENSIONS,
+            "minecraft:the_end",
+            r#"{"type":"minecraft:overworld"}"#.into(),
+        );
+        assert_eq!(o.level_height("minecraft:the_end"), Some(tall));
+        // Ranges the codec refuses.
+        for bad in [
+            r#"{"min_y":-60,"height":384}"#,
+            r#"{"min_y":-64,"height":2112}"#,
+            r#"{"min_y":0,"height":0}"#,
+            r#"{"min_y":0,"height":256,"logical_height":300}"#,
+        ] {
+            o.set(DIMENSION_TYPES, "minecraft:overworld", bad.into());
+            assert_eq!(o.level_height("minecraft:overworld"), None, "{bad}");
+        }
+        // The codec requires has_ceiling: a type without it keeps the pack's
+        // fields and the open-sky default.
+        o.set(
+            DIMENSION_TYPES,
+            "minecraft:overworld",
+            r#"{"min_y":-64,"height":384,"logical_height":384,"has_skylight":true}"#.into(),
+        );
+        let open = o.level_height("minecraft:overworld").unwrap();
+        assert!((open.height, open.has_skylight, open.has_ceiling) == (384, true, false));
     }
 
     #[test]

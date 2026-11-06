@@ -4,6 +4,7 @@
 //! signal while playing, the comparator output, and saving.
 use super::Game;
 use horizon_client::{
+    block_entity_item,
     containers::{BlockEntity, Jukebox},
     first_person::Hand,
     items::ItemStack,
@@ -42,6 +43,16 @@ impl Game<'_> {
             });
         }
     }
+    /// `JukeboxBlock.setPlacedBy`: a jukebox placed from an item whose
+    /// `block_entity_data` carries a `RecordItem` keeps that record, so
+    /// `has_record` turns on: the model draws the disc and `useWithoutItem`
+    /// pops it out. Vanilla reads the item's data, after
+    /// `updateCustomBlockEntityTag` has filled the block entity.
+    pub(super) fn jukebox_placed(&mut self, pos: [i32; 3], stack: &ItemStack) {
+        if block_entity_item::carries_record(stack) {
+            self.set_has_record(pos, true);
+        }
+    }
     /// `onSongChanged`: neighbours (the signal) and comparators.
     fn jukebox_changed(&mut self, pos: [i32; 3]) {
         let p = BlockPos::new(pos[0], pos[1], pos[2]);
@@ -52,6 +63,70 @@ impl Game<'_> {
         });
         self.container_changed((pos[0], pos[1], pos[2]));
         self.world.modified.insert((pos[0] >> 4, pos[2] >> 4));
+    }
+    /// `JukeboxBlockEntity.setTheItem` from a container (a hopper or a dropper
+    /// feeding the slot): a disc that lands in a jukebox that is not playing
+    /// starts its song, as the player's own use does, with the block state,
+    /// the song's level event and the neighbour and comparator updates.
+    pub(super) fn jukebox_inserted(&mut self, pos: [i32; 3]) {
+        let Some(song) = self
+            .jukebox(pos)
+            .filter(|j| !j.playing)
+            .and_then(|j| j.record())
+            .and_then(|record| self.res.items().get(&record.item))
+            .and_then(|info| info.jukebox_song.clone())
+        else {
+            return;
+        };
+        if let Some(BlockEntity::Jukebox(j)) =
+            self.world.block_entities.get_mut(&(pos[0], pos[1], pos[2]))
+        {
+            j.playing = true;
+            j.ticks = 0;
+        }
+        self.set_has_record(pos, true);
+        self.start_song(pos, &song);
+        self.jukebox_changed(pos);
+    }
+    /// `JukeboxBlockEntity.setTheItem(EMPTY)` from a container (a hopper
+    /// below taking the disc): the song stops, the block loses its record,
+    /// and the neighbours and comparators hear it.
+    pub(super) fn jukebox_taken(&mut self, pos: [i32; 3]) {
+        if let Some(BlockEntity::Jukebox(j)) =
+            self.world.block_entities.get_mut(&(pos[0], pos[1], pos[2]))
+        {
+            if j.record().is_some() {
+                return;
+            }
+            j.playing = false;
+            j.ticks = 0;
+        }
+        self.stop_song(pos);
+        self.set_has_record(pos, false);
+        self.jukebox_changed(pos);
+    }
+    pub(super) fn jukebox_set_item(&mut self, pos: [i32; 3], stack: Option<ItemStack>) {
+        let song = stack
+            .as_ref()
+            .and_then(|s| self.res.items().get(&s.item))
+            .and_then(|info| info.jukebox_song.clone());
+        let has_record = stack.is_some();
+        let Some(BlockEntity::Jukebox(j)) =
+            self.world.block_entities.get_mut(&(pos[0], pos[1], pos[2]))
+        else {
+            return;
+        };
+        let was_playing = j.playing;
+        j.items[0] = stack;
+        j.playing = song.is_some();
+        j.ticks = 0;
+        self.set_has_record(pos, has_record);
+        match song {
+            Some(song) => self.start_song(pos, &song),
+            None if was_playing => self.stop_song(pos),
+            None => {}
+        }
+        self.jukebox_changed(pos);
     }
     /// `JukeboxBlock.useItemOn` / `useWithoutItem` on the jukebox at `pos`.
     pub(super) fn use_jukebox(&mut self, pos: [i32; 3], held: Option<&ItemStack>) -> bool {
@@ -64,12 +139,14 @@ impl Game<'_> {
         {
             return false;
         }
-        if self.jukebox(pos).is_some_and(|j| j.record.is_some()) {
+        if self.jukebox(pos).is_some_and(|j| j.record().is_some()) {
             // TRY_WITH_EMPTY_HAND: only the main hand goes on to useWithoutItem.
             if self.hand != Hand::Main {
                 return false;
             }
             self.eject_record(pos);
+            // ServerPlayerGameMode.useItemOn: useWithoutItem consumed the click.
+            self.trigger_default_block_use(pos);
             return true;
         }
         let Some(stack) = held else { return false };
@@ -89,11 +166,11 @@ impl Game<'_> {
         if !self.creative {
             self.consume_held();
         }
-        self.stats.custom("play_record", 1);
+        self.award_custom_stat("play_record", 1);
         self.world.block_entities.insert(
             (pos[0], pos[1], pos[2]),
             BlockEntity::Jukebox(Jukebox {
-                record: Some(record),
+                items: [Some(record)],
                 ticks: 0,
                 playing: true,
             }),
@@ -140,8 +217,10 @@ impl Game<'_> {
         self.jukebox_sounds.insert((pos[0], pos[1], pos[2]), id);
         let description =
             horizon_client::component::to_text(&s.description, &mut |k| Text::literal(k));
-        self.titles
-            .set_overlay(Text::translate("record.nowPlaying", &[description]), true);
+        // Hud.setNowPlaying: the overlay, said at once.
+        let message = Text::translate("record.nowPlaying", &[description]);
+        self.say_system_now(&message);
+        self.titles.set_overlay(message, true);
         self.update_song_volumes();
         self.notify_record_playing(pos, true);
         if self.audio.capture.is_some() {
@@ -196,7 +275,7 @@ impl Game<'_> {
             Some(BlockEntity::Jukebox(j)) => {
                 j.playing = false;
                 j.ticks = 0;
-                j.record.take()
+                j.items[0].take()
             }
             _ => None,
         };
@@ -220,7 +299,7 @@ impl Game<'_> {
     /// `JukeboxSongPlayer.tick` of the jukebox at `key`, while it plays.
     pub(super) fn tick_jukebox(&mut self, key: (i32, i32, i32)) {
         let playing = match self.world.block_entities.get(&key) {
-            Some(BlockEntity::Jukebox(j)) if j.playing => j.record.as_ref().and_then(|r| {
+            Some(BlockEntity::Jukebox(j)) if j.playing => j.record().and_then(|r| {
                 let song = self.items().get(&r.item)?.jukebox_song.clone()?;
                 Some((song, j.ticks))
             }),
@@ -246,6 +325,11 @@ impl Game<'_> {
             self.start_song(pos, &song);
         }
         if ticks % 20 == 0 {
+            // `JukeboxSongPlayer.tick`: `gameEvent(JUKEBOX_PLAY, pos,
+            // Context.of(state))` every twenty ticks while a song plays, for
+            // the sculk listeners and the allays around it.
+            let state = self.world.block(pos[0], pos[1], pos[2]);
+            self.post_block_game_event("minecraft:jukebox_play", pos, None, Some(state));
             let color = f64::from(self.world.random.next_int_bound(4).unwrap_or(0)) / 24.0;
             let at = [
                 f64::from(pos[0]) + 0.5,
@@ -310,8 +394,7 @@ pub(super) fn jukebox_signals(
     match world.block_entities.get(&(pos.x, pos.y, pos.z)) {
         Some(BlockEntity::Jukebox(j)) => {
             let comparator = j
-                .record
-                .as_ref()
+                .record()
                 .and_then(|r| items.get(&r.item)?.jukebox_song.as_ref())
                 .and_then(|s| items.songs.get(s))
                 .map_or(0, |s| s.comparator);
@@ -351,5 +434,102 @@ mod tests {
         // A level that plays its own jukebox: also until the jukebox stops.
         assert!(keeps_song(true, false, true));
         assert!(!keeps_song(true, false, false));
+    }
+}
+
+#[cfg(test)]
+mod jukebox_play_tests {
+    use super::*;
+
+    /// A windowless game from the prepared resources with a jukebox at
+    /// (0, 64, 0), a disc in hand and its song started, ticked `ticks` times:
+    /// the game events it posted, in order. `None` without the resources.
+    fn playing(ticks: i32) -> Option<Vec<String>> {
+        use crate::game::{Audio, Game, Options, Progress, Settings, load_resources};
+        let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES")?);
+        let settings = Settings::default();
+        let loaded = load_resources(
+            root.clone(),
+            None,
+            &root,
+            &settings,
+            std::time::Instant::now(),
+            false,
+            true,
+            &Progress::new(),
+            &mut |_, _| unreachable!(),
+        )
+        .ok()?;
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.resources = root.clone();
+        options.execution_role = crate::game::execution_role::ExecutionRole::IntegratedServer;
+        let mut game = Game::new(
+            &loaded.resources,
+            loaded.pack,
+            loaded.gui.unwrap(),
+            options,
+            settings,
+            Audio::silent(&root),
+            None,
+        )
+        .unwrap();
+        // `World::set` writes into a resident chunk only.
+        game.world.chunks.insert(
+            (0, 0),
+            std::sync::Arc::new(horizon_client::chunk::Chunk::empty(0, 0)),
+        );
+        let jukebox = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:jukebox")?;
+        game.world.set(0, 64, 0, jukebox).unwrap();
+        let disc = ItemStack::new("minecraft:music_disc_cat", 1);
+        crate::game::dispense_fixture::start_recording();
+        assert!(
+            game.use_jukebox([0, 64, 0], Some(&disc)),
+            "the disc goes in"
+        );
+        for _ in 0..ticks {
+            game.tick_jukebox((0, 64, 0));
+        }
+        Some(crate::game::dispense_fixture::stop_recording())
+    }
+
+    /// `JukeboxSongPlayer.tick` posts `JUKEBOX_PLAY` at the jukebox every
+    /// `PLAY_EVENT_INTERVAL_TICKS` (20) ticks of a song, next to the note
+    /// particle it already drew. Horizon drew the particle and kept the
+    /// listeners deaf: a sculk sensor beside a playing jukebox never clicked.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn a_playing_jukebox_posts_jukebox_play_every_twenty_ticks() {
+        let Some(lines) = playing(41) else { return };
+        let plays: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.ends_with("minecraft:jukebox_play"))
+            .collect();
+        assert_eq!(
+            plays,
+            vec![
+                &"G 0,64,0 minecraft:jukebox_play".to_owned(),
+                &"G 0,64,0 minecraft:jukebox_play".to_owned(),
+                &"G 0,64,0 minecraft:jukebox_play".to_owned(),
+            ],
+            "{lines:?}"
+        );
+        // The song is still playing after 41 ticks.
+        assert!(
+            lines.iter().all(|l| l.ends_with("minecraft:jukebox_play")),
+            "{lines:?}"
+        );
+    }
+
+    /// A jukebox whose song is stopped posts no play event: only the twenty
+    /// ticks of a playing song do.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn a_stopped_jukebox_posts_no_play_event() {
+        let Some(lines) = playing(0) else { return };
+        assert!(lines.is_empty(), "{lines:?}");
     }
 }

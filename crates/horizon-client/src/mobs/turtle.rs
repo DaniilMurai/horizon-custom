@@ -32,7 +32,9 @@ pub fn register(m: &mut Mob) {
     ] {
         m.set_malus(t, -1.0);
     }
-    m.ai.nav.kind = NavKind::Amphibious;
+    m.ai.nav.kind = NavKind::Amphibious {
+        prefers_shallow: false,
+    };
     let food = m.kind.food.clone();
     let g = &mut m.ai.goals;
     g.add(0, Panic::new(1.2).looking_for_water(7));
@@ -173,6 +175,13 @@ pub fn ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
             events.push(MobEvent::BlockBreakEffect {
                 pos: at,
                 block: below,
+            });
+            // Turtle.aiStep: `gameEvent(GameEvent.ENTITY_ACTION)` after the level event.
+            events.push(MobEvent::GameEvent {
+                event: "minecraft:entity_action",
+                at: [m.position.x, m.position.y, m.position.z],
+                source: m.id,
+                state: horizon_world::registry::BlockStateId(0),
             });
         }
     }
@@ -603,8 +612,8 @@ mod tests {
     #[test]
     fn water_speed_is_cut_away_from_home_and_for_babies() {
         // updateSpeed in water near home: no cut, the lerp climbs towards
-        // 0.25, and it lifts the turtle 0.005 a tick. (Only the control's
-        // speed: Turtle.travelInWater is not ported.)
+        // 0.25, and it lifts the turtle 0.005 a tick. (Tests only the move
+        // control's speed; Turtle.travelInWater is ported in travel().)
         let mut m = strolling_turtle();
         m.on_ground = false;
         m.fluids.in_water = true;
