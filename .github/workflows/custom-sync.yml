@@ -1,0 +1,75 @@
+# Tells us when Horizon has a launcher release the custom build does not have yet (CUSTOM.md).
+#
+# Every day, and on demand: tools/update-custom.sh --check fetches Horizon's newest launcher@ release,
+# says whether main already has it and whether merging it would conflict, and a new release opens an
+# issue with that answer. The merge itself is one command on a computer: tools/update-custom.sh
+# (the workflow token cannot push the workflow files every upstream merge brings).
+#
+# Horizon's own workflows arrive with every merge and none of them belongs here: the first step
+# disables every workflow whose file is not custom-*.yml.
+name: custom sync
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: custom-sync
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Only our workflows run here
+        run: |
+          gh workflow list --all --json id,path,state \
+            --jq '.[] | select(.state == "active" and (.path | startswith(".github/workflows/custom-") | not)) | "\(.id) \(.path)"' |
+            while read -r id path; do
+              echo "disabling $path"
+              gh workflow disable "$id"
+            done
+      - name: Is there a newer upstream launcher release
+        run: |
+          tools/update-custom.sh --check | tee check.log
+          tag=$(sed -n 's/^Upstream \(launcher@[0-9][0-9.]*\) .*/\1/p' check.log)
+          if [[ -z $tag ]]; then
+            echo "Nothing new."
+            exit 0
+          fi
+          title="Upstream $tag is out"
+          if [[ -n $(gh issue list --state all --search "\"$title\" in:title" --json number --jq '.[0].number') ]]; then
+            echo "$title: already reported."
+            exit 0
+          fi
+          {
+            echo "Horizon released [$tag](https://github.com/horizon-rust/horizon/releases/tag/$tag), and main does not have it yet."
+            echo
+            echo '```'
+            cat check.log
+            echo '```'
+            echo
+            echo "To update, on a computer:"
+            echo
+            echo '```'
+            echo "git switch main && git pull"
+            echo "tools/update-custom.sh"
+            echo '```'
+            echo
+            echo "It merges the release into a \`sync/\` branch and runs the checks. \`git rerere\` replays any conflict fixed before."
+            echo "Then push the branch, open a pull request into main and, once merged, tag a release (CUSTOM.md)."
+          } > issue.md
+          gh issue create --title "$title" --body-file issue.md
