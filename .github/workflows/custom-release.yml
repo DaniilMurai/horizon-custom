@@ -1,0 +1,242 @@
+# Builds and publishes a release of the custom launcher (CUSTOM.md).
+#
+# Push a tag `v<upstream launcher version>-custom.<n>`, for example v0.2.47-custom.1, and the launcher
+# is tested and built for macOS (Apple silicon and Intel), Windows and Linux, and published as a GitHub
+# release with a SHA256SUMS file. The number in the window is the upstream version (0.2.47); the
+# release number (custom.1) lives in the tag, and a build outside Horizon's pipeline says "Custom" and
+# never replaces itself.
+#
+# Run by hand (workflow_dispatch) with `publish` off, it builds everything and publishes nothing.
+#
+# Horizon's own launcher.yml needs Horizon's signing keys and runners and is disabled here; this one
+# follows its packaging steps (packaging/macos/package.sh, packaging/linux/appimage.sh) without them.
+# The macOS app is ad-hoc signed, not notarised: see the README for how to open it.
+name: custom release
+
+on:
+  push:
+    tags:
+      - 'v*-custom.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag to build as (v0.2.47-custom.1)
+        required: true
+      publish:
+        description: Publish the release (when off, only build it)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: custom-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  HORIZON_TELEMETRY_URL: 'off'
+
+jobs:
+  decide:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.decide.outputs.tag }}
+      version: ${{ steps.decide.outputs.version }}
+      publish: ${{ steps.decide.outputs.publish }}
+    steps:
+      - id: decide
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+        run: |
+          tag=${INPUT_TAG:-$GITHUB_REF_NAME}
+          if [[ ! $tag =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-custom\.[0-9]+$ ]]; then
+            echo "::error::the tag must look like v0.2.47-custom.1, not $tag"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          if [[ $GITHUB_EVENT_NAME == push || $INPUT_PUBLISH == true ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: decide
+    name: build ${{ matrix.name }}
+    # The Intel Mac build is cross-compiled on an Apple silicon runner: its failure never holds the
+    # other platforms' release, which goes out without its files.
+    continue-on-error: ${{ matrix.name == 'macos-x64' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-22.04
+            asset: horizon-launcher-linux-x86_64.tar.gz
+            binary: horizon-launcher
+          - name: macos
+            os: macos-latest
+            asset: horizon-launcher-macos-arm64.zip
+            binary: horizon-launcher
+            mac_arch: arm64
+          - name: macos-x64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            asset: horizon-launcher-macos-x64.zip
+            binary: horizon-launcher
+            mac_arch: x64
+          - name: windows
+            os: windows-latest
+            asset: horizon-launcher-windows-x64.zip
+            binary: horizon-launcher.exe
+            pe_arch: x64
+            setup_asset: horizon-launcher-setup.exe
+            # The C runtime linked in: without it the launcher asks for VCRUNTIME140.dll.
+            rustflags: -C target-feature=+crt-static
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      # Where cargo puts the launcher: target/release, or target/<target>/release for another target.
+      BIN: ${{ matrix.target && format('target/{0}/release', matrix.target) || 'target/release' }}
+      # Horizon's Azure app for Microsoft sign-in, a repository variable (not a secret: it is in every
+      # launcher download).
+      HORIZON_MSA_CLIENT_ID: ${{ vars.HORIZON_MSA_CLIENT_ID }}
+      # The upstream version this build is based on. No HORIZON_LAUNCHER_TAG: that is what makes it "Custom".
+      HORIZON_LAUNCHER_VERSION: ${{ needs.decide.outputs.version }}
+    defaults:
+      run:
+        working-directory: launcher
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: launcher
+          shared-key: custom-launcher-${{ matrix.name }}
+      - name: Linux libraries GPUI links to
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev patchelf
+      - name: Metal shaders compiled now, or at run time without the Metal toolchain
+        if: runner.os == 'macOS'
+        run: |
+          if ! xcrun metal --version > /dev/null 2>&1; then
+            echo "::notice::No Metal toolchain on this runner: GPUI compiles its shaders at run time"
+            echo "LAUNCHER_FEATURES=gpui_platform/runtime_shaders" >> "$GITHUB_ENV"
+          fi
+      # Every test target, on each system the launcher ships for. The tests that pin the custom
+      # changes (custom_build_*, tests/owner_gate.rs) are among them.
+      - run: cargo test --release --locked ${{ matrix.target && format('--target {0}', matrix.target) || '' }} ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
+        # An Intel binary cannot run its tests on an Apple silicon runner: it is built, not tested.
+        if: matrix.name != 'macos-x64'
+      - run: cargo build --release --locked ${{ matrix.target && format('--target {0}', matrix.target) || '' }} ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
+      - name: Verify Windows executable architecture
+        if: runner.os == 'Windows'
+        run: python ../tools/check_pe_arch.py "${{ matrix.pe_arch }}" "$BIN/${{ matrix.binary }}"
+      - name: The version is the upstream one, and the build says Custom
+        if: matrix.name != 'macos-x64'
+        run: |
+          out=$("$BIN/${{ matrix.binary }}" --version)
+          echo "$out"
+          [[ "$out" == "horizon-launcher $HORIZON_LAUNCHER_VERSION" ]] || { echo "::error::expected horizon-launcher $HORIZON_LAUNCHER_VERSION"; exit 1; }
+      - name: Only system libraries
+        run: |
+          file="$BIN/${{ matrix.binary }}"
+          case "$RUNNER_OS" in
+            Windows) python ../tools/check_imports.py "$file" ;;
+            macOS) others=$(otool -L "$file" | tail -n +2 | awk '{print $1}' | grep -v -E '^(/usr/lib/|/System/Library/)' || true)
+                   [[ -z "$others" ]] || { echo "::error::links $others"; exit 1; } ;;
+          esac
+      - name: Package
+        run: |
+          rm -rf dist out && mkdir -p out
+          version=$HORIZON_LAUNCHER_VERSION
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            # Horizon.app, zipped and in a .dmg, ad-hoc signed: packaging/macos.
+            python3 -m venv "$RUNNER_TEMP/dmg" && "$RUNNER_TEMP/dmg/bin/pip" install --quiet dmgbuild==1.6.5
+            DMGBUILD="$RUNNER_TEMP/dmg/bin/dmgbuild" ../packaging/macos/package.sh "$BIN/${{ matrix.binary }}" "$version" out ${{ matrix.mac_arch }}
+            rm -rf out/Horizon.app
+          else
+            if [[ "$RUNNER_OS" == "Linux" ]]; then
+              # The AppImage is what a player downloads and double-clicks (packaging/linux/appimage.sh).
+              ../packaging/linux/appimage.sh "$BIN/${{ matrix.binary }}" "$version" out
+            fi
+            mkdir -p dist
+            cp "$BIN/${{ matrix.binary }}" dist/
+            if [[ "${{ matrix.asset }}" == *.tar.gz ]]; then
+              (cd dist && tar czf ../out/${{ matrix.asset }} ${{ matrix.binary }})
+            else
+              (cd dist && 7z a ../out/${{ matrix.asset }} ${{ matrix.binary }})
+            fi
+          fi
+          ls -l out
+      - name: Setup exe (Windows)
+        # The launcher's binary under another name: started with no arguments it shows the per-user
+        # installer instead of Home (launcher/src/installer.rs).
+        if: runner.os == 'Windows'
+        run: cp "$BIN/${{ matrix.binary }}" "out/${{ matrix.setup_asset }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset }}
+          path: launcher/out/*
+          retention-days: 7
+
+  release:
+    needs: [decide, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.decide.outputs.tag }}
+      VERSION: ${{ needs.decide.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums and notes
+        run: |
+          cd dist
+          sha256sum horizon-launcher-* > SHA256SUMS
+          ls -l
+          cd ..
+          {
+            echo "Unofficial custom build of the Horizon launcher, based on Horizon's launcher $VERSION."
+            echo
+            echo "What differs from Horizon's own launcher:"
+            echo
+            echo "- Play starts the game offline when no account that owns Minecraft is signed in; the owner screen is optional."
+            echo "- It never replaces itself with an official release: download new versions from here."
+            echo "- The game gets an X-ray option when it is built from this repository."
+            echo
+            echo "See CUSTOM.md for the changes, and the README for how to install."
+            echo
+            echo "macOS: the app is not notarised, so macOS asks before opening it the first time (README)."
+            echo
+            echo "SHA-256 of each file: SHA256SUMS."
+          } > notes.md
+          cat notes.md
+      - name: Publish ${{ needs.decide.outputs.tag }}
+        if: needs.decide.outputs.publish == 'true'
+        run: |
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "Horizon launcher $VERSION Custom (${TAG##*-custom.})" \
+            --notes-file notes.md dist/*
+      - name: Dry run, the release that would be published
+        if: needs.decide.outputs.publish != 'true'
+        run: echo "Would publish $TAG at $GITHUB_SHA"; ls -l dist
