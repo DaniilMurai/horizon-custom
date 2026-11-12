@@ -40,6 +40,11 @@ thread_local! {
     static LEVEL: Cell<Option<&'static str>> = const { Cell::new(None) };
 }
 
+/// The level this thread acts in (`in_level`), for a helper thread to act in it too.
+pub fn current_level() -> Option<&'static str> {
+    LEVEL.get()
+}
+
 /// Scope authority to this thread and restore it even on an error or panic.
 /// Nested guest actions may temporarily enter a different dimension.
 pub fn in_level<R>(dimension: Option<&'static str>, f: impl FnOnce() -> R) -> R {
@@ -55,6 +60,21 @@ pub fn in_level<R>(dimension: Option<&'static str>, f: impl FnOnce() -> R) -> R 
 
 pub fn emit(event: Event<'_>) {
     dispatch(event, &mut 0.0);
+}
+
+/// The game's native trample hook (`native_trample`), set once by the game: dimension, entity
+/// id, entity type, the farmland's position, the fall distance and cancel.
+pub static TRAMPLE: OnceLock<fn(&str, i32, &str, [i32; 3], f64, &mut bool)> = OnceLock::new();
+
+/// Whether the mods let `entity` (of type `kind`) trample the farmland at `position`.
+pub fn trample_allowed(entity: i32, kind: &str, position: BlockPos, distance: f64) -> bool {
+    let (Some(dimension), Some(hook)) = (LEVEL.get(), TRAMPLE.get()) else {
+        return true;
+    };
+    let mut cancel = false;
+    let at = [position.x, position.y, position.z];
+    hook(dimension, entity, kind, at, distance, &mut cancel);
+    !cancel
 }
 
 /// Damage is the calculated fall damage, before hurt handling and fall sounds.
