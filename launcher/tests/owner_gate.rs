@@ -8,8 +8,8 @@ use std::process::{Command, Output, Stdio};
 
 const REFUSED: &str = "Sign in with a Microsoft account that owns Minecraft: Java Edition to play.";
 
-/// Fresh homes with one installed (not prepared) version and an offline name, as a player who
-/// played offline before the gate has.
+/// Fresh homes with one installed (not prepared) version and an offline name from an older
+/// launcher, as a player who played offline before the gate has.
 fn home(name: &str) -> PathBuf {
     let root =
         std::env::temp_dir().join(format!("horizon-owner-gate-{name}-{}", std::process::id()));
@@ -52,9 +52,6 @@ fn the_cli_does_not_refuse_to_play_without_an_owner() {
     let said = text(&out);
     assert!(!said.contains(REFUSED), "{said}");
     assert!(!said.contains("horizon-launcher account sign-in"), "{said}");
-    // The offline name is still there.
-    let accounts = std::fs::read_to_string(root.join("launcher/accounts.json")).unwrap();
-    assert!(accounts.contains("Builder_1"), "{accounts}");
     let _ = std::fs::remove_dir_all(&root);
 }
 

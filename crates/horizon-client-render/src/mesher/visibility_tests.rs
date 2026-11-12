@@ -84,6 +84,7 @@ fn info(solid: bool) -> Info {
         block_entity: false,
         tints: [Tint::None; 2],
         tint_count: 0,
+        colormap: None,
         offset: None,
         legacy_solid: false,
         overlay: false,
@@ -93,6 +94,7 @@ fn info(solid: bool) -> Info {
         opaque_cube: solid,
         blocks_flow: false,
         ice: false,
+        opaque_ice: false,
         sturdy: 0,
         face: [0; 6],
         cover: [0.0; 6],
@@ -303,7 +305,7 @@ fn visibility_preserves_every_face_pair() {
 }
 
 #[test]
-#[ignore = "opt-in optimized microbenchmark; see docs/visibility-benchmark.md"]
+#[ignore = "opt-in microbenchmark: cargo test --profile fast ... visibility_benchmark -- --ignored --exact --nocapture"]
 fn visibility_benchmark() {
     use std::{hint::black_box, time::Instant};
     const WARMUP: usize = 200;
