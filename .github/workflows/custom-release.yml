@@ -186,7 +186,7 @@ jobs:
         # installer instead of Home (launcher/src/installer.rs).
         if: runner.os == 'Windows'
         run: cp "$BIN/${{ matrix.binary }}" "out/${{ matrix.setup_asset }}"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: ${{ matrix.asset }}
           path: launcher/out/*
