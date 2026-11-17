@@ -2,6 +2,31 @@
 
 How parity work is run, checked and merged. What is ported and where it is checked: [Rust rewrite status](rust-parity.md).
 
+## Datafix downloads and author self-checks
+
+Datafix generation owns a private writable root, defaulting to checkout `.local/datafix`.
+`HORIZON_DATAFIX_ROOT` overrides it (relative values resolve from the invoking working directory).
+Minecraft input symlinks never select this output root. The tool refuses shared vanilla
+roots and their ancestors, escaping default symlinks, escaping descendant symlinks, file roots and unwritable
+ancestors before downloads, world generation or `generate.lock` creation. Choose a new private
+directory on refusal; never change permissions on shared fixtures to bypass the guard.
+
+Author `pr_ready` excludes datafix by default and prints one opt-in reminder. To explicitly
+allow it among the affected harnesses, use a private directory. Local opt-in preflights the
+root conservatively even when affected dependencies are unknown, and passes its validated
+absolute path into subprocesses so a working-directory change cannot reinterpret it:
+
+```sh
+HORIZON_DATAFIX_ROOT="$PWD/.local/datafix-private" python3 tools/pr_ready.py --datafix
+```
+
+Direct `tools/parity.py datafix` is also an explicit harness run and may download jars and
+runtimes, launch servers and generate worlds. Metadata for cold Linux 1.8.9 alone lists
+8,320,755 bytes for the server jar plus 235,129,362 bytes for the pinned legacy runtime:
+243,450,117 bytes before JSON metadata and generated worlds. Other versions/runtimes add
+more; cached payload can be zero. No runtime measurement is available for this repair.
+Fork issue arismoko/horizon#3027 tracks whether CI runs datafix.
+
 ## Running the vanilla harnesses
 
 Same-machine fixtures created with `lab.game_env` use `HORIZON_TEST_LOOPBACK=1`: Horizon
@@ -33,7 +58,7 @@ Each harness runs unmodified under a tracer that records the files it depended o
 
 Vanilla oracle runs are reused as well. `tools/parity_shim.py` stands in for `java` and `javac`: it records each oracle run's outputs and the content of every file under the paths its arguments name, and replays the run while those are unchanged. After a Rust-only change a harness pays only for its Rust side (`block_update`: 53 s to 5 s). Files an oracle writes outside its named paths aren't tracked, so a harness that fails while reusing oracle results is rerun fresh, and stops reusing them if it then passes. `--all` and `--fresh` never reuse them.
 
-Probes build into `.local/parity-target/` with release optimisation but no LTO and 16 codegen units. On ludodesktop that rebuilds every `horizon-world` probe in 3 seconds after a one-line change, against 122 seconds with the release profile. Rust gives these settings identical results (no fast-math; overflow checks as in release), and the full harness suite passes under them. Probes that harnesses build in the dev profile get `opt-level = 3` too, keeping their overflow checks and debug assertions. Harnesses must locate binaries through `cargo metadata` or `lab.cargo_target()`, never a hard-coded `target/`.
+Probes build into `.local/parity-target/` with release optimisation but no LTO and 16 codegen units. On a 24-thread Linux machine that rebuilds every `horizon-world` probe in 3 seconds after a one-line change, against 122 seconds with the release profile. Rust gives these settings identical results (no fast-math; overflow checks as in release), and the full harness suite passes under them. Probes that harnesses build in the dev profile get `opt-level = 3` too, keeping their overflow checks and debug assertions. Harnesses must locate binaries through `cargo metadata` or `lab.cargo_target()`, never a hard-coded `target/`.
 
 The probes of `horizon-world` and of `horizon-client` are one binary per crate, `world_probe` and `client_probe` (`cargo build --release -p horizon-world --example world_probe`): a harness runs `world_probe <name> [arguments]`, and `<name>` is a module in `crates/<crate>/examples/probe/` (add it to the `mod` list and the `probes!` list in its `main.rs`; read arguments with `crate::args()` or `crate::args_os()`, which drop the name). Code several probes share goes in `examples/probe/support/` or a module of its own. Linking one binary instead of ~250 examples is most of what a probe build used to cost. Each crate's probe has its own target name (set in its `Cargo.toml`, `protocol_probe` too): Cargo copies every crate's examples into one `<profile>/examples/` directory, and with one shared name a harness could run the binary another harness had just copied there. The runner counts only the probes a harness ran, the probes and support modules they name, their own subdirectories and `dispatch.rs` as its dependencies, not `main.rs`, which only lists the probes: editing one probe reruns only its harnesses, and adding one reruns none.
 
@@ -49,7 +74,7 @@ The game logs into `HORIZON_HOME` and falls back to the player's own game folder
 
 ### Other machines
 
-Harnesses can also run on the Mac mini, the desktop and playhorizon (`tools/parity_hosts.json` describes them; `desktop` and `playhorizon` use their CI runner's environment and vanilla data, the desktop's entry describes its 10-26 setup, retired, and refuses work: docs/release-flow.md, "The desktop's runner"; its `default` list is empty, so pass `--hosts macmini,playhorizon` or set `PARITY_HOSTS`, after copying `shared-local/` to `~/code/horizon-parity/shared-local` on each host). The runner mirrors the worktree there with rsync (not `.git`, `.local`, `target` or ignored files) into `~/code/horizon-parity/remote/<host><path>`, whose `.local` links to the vanilla data in `~/code/horizon-parity/shared-local`, and starts `tools/parity.py --worker` over ssh. The worker builds the probes (about 80 s the first time) and runs what it is sent under the same tracer, admitting harnesses against its own free memory. One queue, longest first, feeds every machine, remote ones first: the Mac takes up to 14 harnesses, the desktop 8, playhorizon 3 (on CPUs 0-3: its CI runner has 4-7). Each pass comes back with the content hash of every file it depended on, so it is keyed on exactly what ran, and logs come back to `.local/parity-runner/logs/`; state, sharing and `gate.py` work as before. If a host can't be reached, or drops out, its harnesses run here.
+Harnesses can also run on the Mac mini and playhorizon (`tools/parity_hosts.json` describes them; `playhorizon` uses its CI runner's environment and vanilla data; its `default` list is empty, so pass `--hosts macmini,playhorizon` or set `PARITY_HOSTS`, after copying `shared-local/` to `~/code/horizon-parity/shared-local` on each host). The runner mirrors the worktree there with rsync (not `.git`, `.local`, `target` or ignored files) into `~/code/horizon-parity/remote/<host><path>`, whose `.local` links to the vanilla data in `~/code/horizon-parity/shared-local`, and starts `tools/parity.py --worker` over ssh. The worker builds the probes (about 80 s the first time) and runs what it is sent under the same tracer, admitting harnesses against its own free memory. One queue, longest first, feeds every machine, remote ones first: the Mac takes up to 14 harnesses, playhorizon 3 (on CPUs 0-3: its CI runner has 4-7). Each pass comes back with the content hash of every file it depended on, so it is keyed on exactly what ran, and logs come back to `.local/parity-runner/logs/`; state, sharing and `gate.py` work as before. If a host can't be reached, or drops out, its harnesses run here.
 
 Harnesses a host can't run are listed in the file: `local_only` (`save_roundtrip` runs the game on a virtual screen) and each host's `exclude`. A host's `exclude` also holds when `parity.py` runs on that host itself, as its CI runner does: the harness is skipped there with its reason (playhorizon skips `remote_fireball` and `remote_fireworks`, which its CPU-starved CI slice fails even on bare main), unless named on the command line. The Mac mini's runner and the nightly audit still run them. The Mac excludes nothing: vanilla's `Math.sin`, `pow`, `log` and the like don't round the same on an Apple silicon Mac as on Linux (HotSpot uses fdlibm there, Intel's stubs on x86-64), and Rust's float functions round like neither (they call the platform libm), so code that mirrors a vanilla `Math` call uses `horizon_core::jmath`, which computes what HotSpot computes on the host architecture. The ThinkPad no longer runs harnesses (2026-10-26): playhorizon is the Linux host that is always on.
 
@@ -72,6 +97,7 @@ A harness can declare, at the top level of its script:
 
 - `PARITY_SHARDS = N`: it runs as `NAME#1` to `NAME#N`, in parallel, each told its share in `PARITY_SHARD=i/N` (`test_datafix_parity.py` upgrades every sixth world). `NAME` on the command line or in `--known-failures` means all of them.
 - `PARITY_RUST_SCOPE = [...]`: the Rust sources its probes can reach, as path prefixes. Cargo's dep-info names every file of every crate a probe links, so without it a probe of `horizon-world` depends on all 350 of its files. The runner keeps only the scope's files if the scope is closed: nothing in it names a module, crate-root re-export or macro outside it (`crate::`, `super::`, other workspace crates; comments and strings ignored), declares a module it doesn't cover, or includes source, and nothing outside it implements anything for a type it defines. Crate roots then count without their declarations of other modules, so adding a module elsewhere doesn't rerun the harness. If the scope isn't closed the runner says why and keeps every file. `datafix` depends on 41 files this way, not 354.
+- `PARITY_MANUAL = "<how to run it>"`: the script is a proof someone runs by hand with arguments (a Java side, then a native side against its reference), not a harness. `parity.py` leaves it out of every run, `--changed` and parity-main included, and names that text when it is asked for it by name.
 
 ### Which harnesses a change affects
 
@@ -100,7 +126,7 @@ An agent working an area merges the integration branch first, uses `tools/parity
 
 `check` and `integrate` start by trial-merging the candidates with `git merge-tree`, in the object database, without touching any worktree: each branch alone, every pair, then the largest set without conflicts, merged in turn. That takes about a second for ten branches and names the conflicting files. `integrate` merges that set, gates it once (formatting, lints and tests before the long harness run; the flake check covers everything the branches change) and pushes. If the gate fails it tries each half of the set in turn, so the branches that pass still land; `--no-bisect` turns that off.
 
-On ludodesktop, source `~/code/horizon-parity/env.sh` first: it sets the ALSA build path and the Cargo job cap. Debug builds carry line tables only (`[profile.dev]` in `Cargo.toml`), which keeps backtraces readable while keeping each worktree's build small; a fresh worktree builds `horizon-client` and its tests in under a minute.
+Debug builds carry line tables only (`[profile.dev]` in `Cargo.toml`), which keeps backtraces readable while keeping each worktree's build small; a fresh worktree builds `horizon-client` and its tests in under a minute.
 
 ## Server execution in game fixtures
 
@@ -129,6 +155,11 @@ python3 tools/lan_e2e.py --check machines --check fireball --check sculk_contain
 The LAN checks open and fill machines through the guest's inventory packets, observe a
 powered dispenser's projectile on both clients, and open a chest to activate a sculk sensor
 and shrieker. They supplement the deterministic component comparisons.
+
+A new `command_exec` group goes into a file of its own under `tools/command_exec_groups/`: a module
+with `GROUP` (its name) and `cases(cmd, setup)` (its ops). The corpus finds it by file name, so two
+pull requests that each add a group don't touch the same lines (#16833). Most existing groups are
+still functions in `tools/command_exec_corpus.py`.
 
 ### Randoms that repeat
 
@@ -160,7 +191,7 @@ python3 tools/parity_fuzz.py --replay scenarios.json                            
 ## Reading vanilla
 
 Game jars, decompiled sources and reports live in the gitignored `.local/`, rebuilt from your own copy of the game;
-nothing of Mojang's is committed or downloaded by the tools ([README](../README.md#build-from-source)):
+nothing of Mojang's is committed or downloaded by the tools ([README](native-client.md#run-from-a-checkout)):
 
 ```sh
 python3 tools/lab.py prepare --server-jar ~/Downloads/server.jar   # checks the pinned jars (research-lock.json)
@@ -189,7 +220,7 @@ the same path as normal single player. `python3 tools/test_friends.py --client
 target/fast/horizon-client --relay target/fast/horizon-relay --baseline` covers
 plain LAN, direct invitations, a local relay and ended invitations in that mode.
 Run Linux games under `xvfb-run -a` when no display is available. Each
-process gets scratch game, launcher, XDG data and config homes; telemetry, audio
+process gets scratch game, launcher, XDG data and config homes; audio
 and launcher self-update are disabled.
 
 `lan_integration` and `friends_integration` register these suites with `parity.py`.
